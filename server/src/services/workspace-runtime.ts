@@ -1192,6 +1192,8 @@ export function normalizeAdapterManagedRuntimeServices(input: {
 async function startLocalRuntimeService(input: {
   db?: Db;
   runId: string;
+  leaseRunId?: string | null;
+  startedByRunId?: string | null;
   agent: ExecutionWorkspaceAgentRef;
   issue: ExecutionWorkspaceIssueRef | null;
   workspace: RealizedExecutionWorkspace;
@@ -1203,6 +1205,8 @@ async function startLocalRuntimeService(input: {
   scopeType: "project_workspace" | "execution_workspace" | "run" | "agent";
   scopeId: string | null;
 }): Promise<RuntimeServiceRecord> {
+  const leaseRunId = input.leaseRunId === undefined ? input.runId : input.leaseRunId;
+  const startedByRunId = input.startedByRunId === undefined ? input.runId : input.startedByRunId;
   const identity = resolveRuntimeServiceReuseIdentity({
     service: input.service,
     workspace: input.workspace,
@@ -1299,7 +1303,7 @@ async function startLocalRuntimeService(input: {
       provider: "local_process",
       providerRef: String(adoptedRecord.pid),
       ownerAgentId: input.agent.id ?? null,
-      startedByRunId: input.runId,
+      startedByRunId,
       lastUsedAt: new Date().toISOString(),
       startedAt: adoptedRecord.startedAt,
       stoppedAt: null,
@@ -1308,7 +1312,7 @@ async function startLocalRuntimeService(input: {
       reused: true,
       db: input.db,
       child: null,
-      leaseRunIds: new Set([input.runId]),
+      leaseRunIds: leaseRunId ? new Set([leaseRunId]) : new Set(),
       idleTimer: null,
       envFingerprint,
       serviceKey,
@@ -1373,7 +1377,7 @@ async function startLocalRuntimeService(input: {
     provider: "local_process",
     providerRef: child.pid ? String(child.pid) : null,
     ownerAgentId: input.agent.id ?? null,
-    startedByRunId: input.runId,
+    startedByRunId,
     lastUsedAt: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     stoppedAt: null,
@@ -1382,7 +1386,7 @@ async function startLocalRuntimeService(input: {
     reused: false,
     db: input.db,
     child,
-    leaseRunIds: new Set([input.runId]),
+    leaseRunIds: leaseRunId ? new Set([leaseRunId]) : new Set(),
     idleTimer: null,
     envFingerprint,
     serviceKey,
@@ -1648,9 +1652,13 @@ export async function startRuntimeServicesForWorkspaceControl(input: {
       }
     }
 
+    // Manually controlled services are not tied to a heartbeat run lifecycle, so they do not
+    // retain a run lease and never persist a startedByRunId foreign key.
     const record = await startLocalRuntimeService({
       db: input.db,
       runId: invocationId,
+      leaseRunId: null,
+      startedByRunId: null,
       agent: input.actor,
       issue: input.issue,
       workspace: input.workspace,
@@ -1662,7 +1670,6 @@ export async function startRuntimeServicesForWorkspaceControl(input: {
       scopeType,
       scopeId,
     });
-    record.startedByRunId = null;
     registerRuntimeService(input.db, record);
     await persistRuntimeServiceRecord(input.db, record);
     refs.push(toRuntimeServiceRef(record));

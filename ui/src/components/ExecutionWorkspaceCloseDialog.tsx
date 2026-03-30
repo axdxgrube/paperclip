@@ -149,8 +149,8 @@ export function ExecutionWorkspaceCloseDialog({
               <section className="space-y-2">
                 <h3 className="text-sm font-medium">Blocking reasons</h3>
                 <ul className="space-y-2 text-sm text-muted-foreground">
-                  {readiness.blockingReasons.map((reason) => (
-                    <li key={reason} className="break-words rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-destructive">
+                  {readiness.blockingReasons.map((reason, idx) => (
+                    <li key={`blocking-${idx}`} className="break-words rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-destructive">
                       {reason}
                     </li>
                   ))}
@@ -162,8 +162,8 @@ export function ExecutionWorkspaceCloseDialog({
               <section className="space-y-2">
                 <h3 className="text-sm font-medium">Warnings</h3>
                 <ul className="space-y-2 text-sm text-muted-foreground">
-                  {readiness.warnings.map((warning) => (
-                    <li key={warning} className="break-words rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+                  {readiness.warnings.map((warning, idx) => (
+                    <li key={`warning-${idx}`} className="break-words rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
                       {warning}
                     </li>
                   ))}
