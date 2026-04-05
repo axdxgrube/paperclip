@@ -24,6 +24,10 @@ import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 
+export function resolveShell(): string {
+  return process.env.SHELL?.trim() || (process.platform === "win32" ? "sh" : "/bin/sh");
+}
+
 export interface ExecutionWorkspaceInput {
   baseCwd: string;
   source: "project_primary" | "task_session" | "agent_home";
@@ -379,7 +383,7 @@ async function runWorkspaceCommand(input: {
   env: NodeJS.ProcessEnv;
   label: string;
 }) {
-  const shell = process.env.SHELL?.trim() || "/bin/sh";
+  const shell = resolveShell();
   const proc = await executeProcess({
     command: shell,
     args: ["-c", input.command],
@@ -475,7 +479,7 @@ async function recordWorkspaceCommandOperation(
     cwd: input.cwd,
     metadata: input.metadata ?? null,
     run: async () => {
-      const shell = process.env.SHELL?.trim() || "/bin/sh";
+      const shell = resolveShell();
       const result = await executeProcess({
         command: shell,
         args: ["-c", input.command],
@@ -1077,6 +1081,16 @@ async function waitForReadiness(input: {
   throw new Error(`Readiness check failed for ${input.url}: ${lastError}`);
 }
 
+async function isRuntimeServiceUrlHealthy(url: string | null) {
+  if (!url) return true;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 function toPersistedWorkspaceRuntimeService(record: RuntimeServiceRecord): typeof workspaceRuntimeServices.$inferInsert {
   return {
     id: record.id,
@@ -1285,6 +1299,7 @@ async function startLocalRuntimeService(input: {
     const portEnvKey = asString(portConfig.envKey, "PORT");
     env[portEnvKey] = String(port);
   }
+
   const expose = parseObject(input.service.expose);
   const readiness = parseObject(input.service.readiness);
   const urlTemplate =
@@ -1359,7 +1374,8 @@ async function startLocalRuntimeService(input: {
       );
     }
   }
-  const shell = process.env.SHELL?.trim() || "/bin/sh";
+  
+  const shell = resolveShell();
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
     env,
@@ -1841,50 +1857,55 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
       profileKind: "workspace-runtime",
     });
     if (adoptedRecord) {
-      const record: RuntimeServiceRecord = {
-        id: row.id,
-        companyId: row.companyId,
-        projectId: row.projectId ?? null,
-        projectWorkspaceId: row.projectWorkspaceId ?? null,
-        executionWorkspaceId: row.executionWorkspaceId ?? null,
-        issueId: row.issueId ?? null,
-        serviceName: row.serviceName,
-        status: "running",
-        lifecycle: row.lifecycle as RuntimeServiceRecord["lifecycle"],
-        scopeType: row.scopeType as RuntimeServiceRecord["scopeType"],
-        scopeId: row.scopeId ?? null,
-        reuseKey: row.reuseKey ?? null,
-        command: row.command ?? null,
-        cwd: row.cwd ?? null,
-        port: adoptedRecord.port ?? row.port ?? null,
-        url: adoptedRecord.url ?? row.url ?? null,
-        provider: "local_process",
-        providerRef: String(adoptedRecord.pid),
-        ownerAgentId: row.ownerAgentId ?? null,
-        startedByRunId: row.startedByRunId ?? null,
-        lastUsedAt: new Date().toISOString(),
-        startedAt: row.startedAt.toISOString(),
-        stoppedAt: null,
-        stopPolicy: (row.stopPolicy as Record<string, unknown> | null) ?? null,
-        healthStatus: "healthy",
-        reused: true,
-        db,
-        child: null,
-        leaseRunIds: new Set(),
-        idleTimer: null,
-        envFingerprint: row.reuseKey ?? "",
-        serviceKey: adoptedRecord.serviceKey,
-        profileKind: "workspace-runtime",
-        processGroupId: adoptedRecord.processGroupId ?? null,
-      };
-      registerRuntimeService(db, record);
-      await touchLocalServiceRegistryRecord(adoptedRecord.serviceKey, {
-        runtimeServiceId: row.id,
-        lastSeenAt: record.lastUsedAt,
-      });
-      await persistRuntimeServiceRecord(db, record);
-      adopted += 1;
-      continue;
+      const adoptedUrl = adoptedRecord.url ?? row.url ?? null;
+      if (!(await isRuntimeServiceUrlHealthy(adoptedUrl))) {
+        await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
+      } else {
+        const record: RuntimeServiceRecord = {
+          id: row.id,
+          companyId: row.companyId,
+          projectId: row.projectId ?? null,
+          projectWorkspaceId: row.projectWorkspaceId ?? null,
+          executionWorkspaceId: row.executionWorkspaceId ?? null,
+          issueId: row.issueId ?? null,
+          serviceName: row.serviceName,
+          status: "running",
+          lifecycle: row.lifecycle as RuntimeServiceRecord["lifecycle"],
+          scopeType: row.scopeType as RuntimeServiceRecord["scopeType"],
+          scopeId: row.scopeId ?? null,
+          reuseKey: row.reuseKey ?? null,
+          command: row.command ?? null,
+          cwd: row.cwd ?? null,
+          port: adoptedRecord.port ?? row.port ?? null,
+          url: adoptedRecord.url ?? row.url ?? null,
+          provider: "local_process",
+          providerRef: String(adoptedRecord.pid),
+          ownerAgentId: row.ownerAgentId ?? null,
+          startedByRunId: row.startedByRunId ?? null,
+          lastUsedAt: new Date().toISOString(),
+          startedAt: row.startedAt.toISOString(),
+          stoppedAt: null,
+          stopPolicy: (row.stopPolicy as Record<string, unknown> | null) ?? null,
+          healthStatus: "healthy",
+          reused: true,
+          db,
+          child: null,
+          leaseRunIds: new Set(),
+          idleTimer: null,
+          envFingerprint: row.reuseKey ?? "",
+          serviceKey: adoptedRecord.serviceKey,
+          profileKind: "workspace-runtime",
+          processGroupId: adoptedRecord.processGroupId ?? null,
+        };
+        registerRuntimeService(db, record);
+        await touchLocalServiceRegistryRecord(adoptedRecord.serviceKey, {
+          runtimeServiceId: row.id,
+          lastSeenAt: record.lastUsedAt,
+        });
+        await persistRuntimeServiceRecord(db, record);
+        adopted += 1;
+        continue;
+      }
     }
 
     const now = new Date();
