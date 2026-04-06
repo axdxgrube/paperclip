@@ -3,6 +3,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError } from "./embedded-postgres-error.js";
+import { prepareEmbeddedPostgresRuntime } from "./embedded-postgres-runtime.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -34,6 +36,7 @@ export type EmbeddedPostgresTestDatabase = {
 let embeddedPostgresSupportPromise: Promise<EmbeddedPostgresTestSupport> | null = null;
 
 async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
+  await prepareEmbeddedPostgresRuntime();
   const mod = await import("embedded-postgres");
   return mod.default as EmbeddedPostgresCtor;
 }
@@ -58,16 +61,11 @@ async function getAvailablePort(): Promise<number> {
   });
 }
 
-function formatEmbeddedPostgresError(error: unknown): string {
-  if (error instanceof Error && error.message.length > 0) return error.message;
-  if (typeof error === "string" && error.length > 0) return error;
-  return "embedded Postgres startup failed";
-}
-
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-embedded-postgres-probe-"));
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
+  const logBuffer = createEmbeddedPostgresLogBuffer();
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
@@ -75,8 +73,8 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: () => {},
-    onError: () => {},
+    onLog: logBuffer.append,
+    onError: logBuffer.append,
   });
 
   try {
@@ -86,7 +84,10 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   } catch (error) {
     return {
       supported: false,
-      reason: formatEmbeddedPostgresError(error),
+      reason: formatEmbeddedPostgresError(error, {
+        fallbackMessage: "embedded Postgres startup failed",
+        recentLogs: logBuffer.getRecentLogs(),
+      }).message,
     };
   } finally {
     await instance.stop().catch(() => {});
@@ -107,6 +108,7 @@ export async function startEmbeddedPostgresTestDatabase(
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix));
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
+  const logBuffer = createEmbeddedPostgresLogBuffer();
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
@@ -114,8 +116,8 @@ export async function startEmbeddedPostgresTestDatabase(
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: () => {},
-    onError: () => {},
+    onLog: logBuffer.append,
+    onError: logBuffer.append,
   });
 
   try {
@@ -137,8 +139,9 @@ export async function startEmbeddedPostgresTestDatabase(
   } catch (error) {
     await instance.stop().catch(() => {});
     fs.rmSync(dataDir, { recursive: true, force: true });
-    throw new Error(
-      `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
-    );
+    throw formatEmbeddedPostgresError(error, {
+      fallbackMessage: "Failed to start embedded PostgreSQL test database",
+      recentLogs: logBuffer.getRecentLogs(),
+    });
   }
 }

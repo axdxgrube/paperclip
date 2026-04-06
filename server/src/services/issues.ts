@@ -39,6 +39,31 @@ import { getDefaultCompanyGoal } from "./goals.js";
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+}
+
+function fieldValueEquals(left: unknown, right: unknown) {
+  if (left instanceof Date || right instanceof Date) {
+    const leftDate = left instanceof Date ? left : left == null ? null : new Date(left as string);
+    const rightDate = right instanceof Date ? right : right == null ? null : new Date(right as string);
+    if (leftDate === null || rightDate === null) return leftDate === rightDate;
+    return leftDate.getTime() === rightDate.getTime();
+  }
+  if (left !== null && right !== null && typeof left === "object" && typeof right === "object") {
+    return stableStringify(left) === stableStringify(right);
+  }
+  return left === right;
+}
+
+function normalizeIdSet(values: string[]) {
+  return [...new Set(values)].sort();
+}
+
 function assertTransition(from: string, to: string) {
   if (from === to) return;
   if (!ALL_ISSUE_STATUSES.includes(to)) {
@@ -1569,14 +1594,12 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspaceSettings;
       }
 
-      if (issueData.status) {
+      const statusChanged = issueData.status !== undefined && issueData.status !== existing.status;
+      if (issueData.status && statusChanged) {
         assertTransition(existing.status, issueData.status);
       }
 
-      const patch: Partial<typeof issues.$inferInsert> = {
-        ...issueData,
-        updatedAt: new Date(),
-      };
+      const patch: Partial<typeof issues.$inferInsert> = { ...issueData };
 
       const nextAssigneeAgentId =
         issueData.assigneeAgentId !== undefined ? issueData.assigneeAgentId : existing.assigneeAgentId;
@@ -1607,14 +1630,14 @@ export function issueService(db: Db) {
         await assertValidExecutionWorkspace(existing.companyId, nextProjectId, nextExecutionWorkspaceId);
       }
 
-      applyStatusSideEffects(issueData.status, patch);
-      if (issueData.status && issueData.status !== "done") {
+      if (statusChanged) applyStatusSideEffects(issueData.status, patch);
+      if (statusChanged && issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
       }
-      if (issueData.status && issueData.status !== "cancelled") {
+      if (statusChanged && issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
       }
-      if (issueData.status && issueData.status !== "in_progress") {
+      if (statusChanged && issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
       }
       if (
@@ -1624,7 +1647,47 @@ export function issueService(db: Db) {
         patch.checkoutRunId = null;
       }
 
+      const patchEntries = Object.entries(patch).filter(([key, value]) => {
+        if (value === undefined) return false;
+        return !fieldValueEquals((existing as Record<string, unknown>)[key], value);
+      });
+
+      let labelsWillChange = false;
+      if (nextLabelIds !== undefined) {
+        const currentLabelIds = await db
+          .select({ labelId: issueLabels.labelId })
+          .from(issueLabels)
+          .where(eq(issueLabels.issueId, id))
+          .then((rows) => rows.map((row) => row.labelId));
+        labelsWillChange =
+          stableStringify(normalizeIdSet(currentLabelIds)) !== stableStringify(normalizeIdSet(nextLabelIds));
+      }
+
+      let blockedByWillChange = false;
+      if (blockedByIssueIds !== undefined) {
+        const currentBlockedByIssueIds = await db
+          .select({ blockerIssueId: issueRelations.issueId })
+          .from(issueRelations)
+          .where(
+            and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.relatedIssueId, id),
+              eq(issueRelations.type, "blocks"),
+            ),
+          )
+          .then((rows) => rows.map((row) => row.blockerIssueId));
+        blockedByWillChange =
+          stableStringify(normalizeIdSet(currentBlockedByIssueIds)) !==
+          stableStringify(normalizeIdSet(blockedByIssueIds));
+      }
+
+      if (patchEntries.length === 0 && !labelsWillChange && !blockedByWillChange) {
+        const [enrichedExisting] = await withIssueLabels(db, [existing]);
+        return enrichedExisting;
+      }
+
       return db.transaction(async (tx) => {
+        patch.updatedAt = new Date();
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),

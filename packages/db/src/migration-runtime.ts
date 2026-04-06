@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { ensurePostgresDatabase, getPostgresDataDirectory } from "./client.js";
 import { createEmbeddedPostgresLogBuffer, formatEmbeddedPostgresError } from "./embedded-postgres-error.js";
+import { prepareEmbeddedPostgresRuntime } from "./embedded-postgres-runtime.js";
 import { resolveDatabaseTarget } from "./runtime-config.js";
 
 type EmbeddedPostgresInstance = {
@@ -78,6 +79,7 @@ async function findAvailablePort(startPort: number): Promise<number> {
 
 async function loadEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
   try {
+    await prepareEmbeddedPostgresRuntime();
     const mod = await import("embedded-postgres");
     return mod.default as EmbeddedPostgresCtor;
   } catch {
