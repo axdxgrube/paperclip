@@ -8,6 +8,7 @@ import {
   companies,
   createDb,
   executionWorkspaces,
+  heartbeatRuns,
   instanceSettings,
   issueComments,
   issueInboxArchives,
@@ -66,6 +67,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -283,6 +285,99 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
 
   it("returns null instead of throwing for malformed non-uuid issue refs", async () => {
     await expect(svc.getById("not-a-uuid")).resolves.toBeNull();
+  });
+
+  it("treats repeated status updates with no effective change as a no-op", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const completedAt = new Date("2026-04-01T12:00:00.000Z");
+    const updatedAt = new Date("2026-04-01T12:30:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Already complete",
+      status: "done",
+      priority: "medium",
+      completedAt,
+      updatedAt,
+    });
+
+    const first = await svc.update(issueId, { status: "done" });
+    const second = await svc.update(issueId, { status: "done" });
+
+    expect(first?.completedAt?.toISOString()).toBe(completedAt.toISOString());
+    expect(first?.updatedAt?.toISOString()).toBe(updatedAt.toISOString());
+    expect(second?.completedAt?.toISOString()).toBe(completedAt.toISOString());
+    expect(second?.updatedAt?.toISOString()).toBe(updatedAt.toISOString());
+  });
+
+  it("replays duplicate run-scoped comments instead of inserting duplicates", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Comment target",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Run author",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+    });
+
+    const first = await svc.addComment(issueId, "Retry-safe comment", {
+      userId: "local-board",
+      runId,
+    });
+    const second = await svc.addComment(issueId, "Retry-safe comment", {
+      userId: "local-board",
+      runId,
+    });
+
+    const rows = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+
+    expect(rows).toHaveLength(1);
+    expect(first.id).toBe(second.id);
+    expect((first as { replayed?: boolean }).replayed).toBe(false);
+    expect((second as { replayed?: boolean }).replayed).toBe(true);
   });
 
   it("filters issues by execution workspace id", async () => {
@@ -623,6 +718,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);

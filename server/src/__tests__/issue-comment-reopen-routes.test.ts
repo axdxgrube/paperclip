@@ -6,9 +6,14 @@ import { errorHandler } from "../middleware/index.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByOrigin: vi.fn(),
+  create: vi.fn(),
   update: vi.fn(),
+  checkout: vi.fn(),
+  release: vi.fn(),
   addComment: vi.fn(),
   findMentionedAgents: vi.fn(),
+  assertCheckoutOwner: vi.fn(),
 }));
 
 const mockAccessService = vi.hoisted(() => ({
@@ -69,6 +74,7 @@ function createApp() {
       type: "board",
       userId: "local-board",
       companyIds: ["company-1"],
+      runId: req.header("x-paperclip-run-id") ?? undefined,
       source: "local_implicit",
       isInstanceAdmin: false,
     };
@@ -95,6 +101,29 @@ function makeIssue(status: "todo" | "done") {
 describe("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIssueService.getByOrigin.mockResolvedValue(null);
+    mockIssueService.create.mockResolvedValue({
+      ...makeIssue("todo"),
+      id: "issue-created",
+      title: "Created",
+      parentId: "11111111-1111-4111-8111-111111111111",
+    });
+    mockIssueService.checkout.mockImplementation(async () => ({
+      ...makeIssue("todo"),
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      checkoutRunId: null,
+      executionRunId: null,
+    }));
+    mockIssueService.release.mockImplementation(async () => ({
+      ...makeIssue("todo"),
+      assigneeAgentId: null,
+      assigneeUserId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    }));
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({
+      adoptedFromRunId: null,
+    });
     mockIssueService.addComment.mockResolvedValue({
       id: "comment-1",
       issueId: "11111111-1111-4111-8111-111111111111",
@@ -104,6 +133,7 @@ describe("issue comment reopen routes", () => {
       updatedAt: new Date(),
       authorAgentId: null,
       authorUserId: "local-board",
+      replayed: false,
     });
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
   });
@@ -211,5 +241,137 @@ describe("issue comment reopen routes", () => {
         }),
       }),
     );
+  });
+
+  it("returns idempotent replay for duplicate run-scoped issue comments", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+    mockIssueService.addComment
+      .mockResolvedValueOnce({
+        id: "comment-1",
+        issueId: "11111111-1111-4111-8111-111111111111",
+        companyId: "company-1",
+        body: "hello",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        authorAgentId: null,
+        authorUserId: "local-board",
+        replayed: false,
+      })
+      .mockResolvedValueOnce({
+        id: "comment-1",
+        issueId: "11111111-1111-4111-8111-111111111111",
+        companyId: "company-1",
+        body: "hello",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        authorAgentId: null,
+        authorUserId: "local-board",
+        replayed: true,
+      });
+
+    const first = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .set("x-paperclip-run-id", "17ac5446-284d-421e-ad07-da166936762b")
+      .send({ body: "hello" });
+
+    expect(first.status).toBe(201);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.comment_added" }),
+    );
+
+    mockLogActivity.mockClear();
+    mockHeartbeatService.wakeup.mockClear();
+    mockIssueService.findMentionedAgents.mockClear();
+
+    const second = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .set("x-paperclip-run-id", "17ac5446-284d-421e-ad07-da166936762b")
+      .send({ body: "hello" });
+
+    expect(second.status).toBe(200);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockIssueService.findMentionedAgents).not.toHaveBeenCalled();
+  });
+
+  it("replays create-subtask retries without writing duplicates", async () => {
+    mockIssueService.getByOrigin.mockResolvedValue({
+      id: "issue-existing",
+      companyId: "company-1",
+      title: "Created",
+      parentId: "11111111-1111-4111-8111-111111111111",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+    });
+
+    const res = await request(createApp())
+      .post("/api/companies/company-1/issues")
+      .set("x-paperclip-run-id", "17ac5446-284d-421e-ad07-da166936762b")
+      .send({
+        parentId: "11111111-1111-4111-8111-111111111111",
+        title: "Created",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("skips duplicate checkout side effects when retrying the same state", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      ...makeIssue("todo"),
+      status: "in_progress",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    mockIssueService.checkout.mockResolvedValue({
+      ...makeIssue("todo"),
+      status: "in_progress",
+      assigneeAgentId: "22222222-2222-4222-8222-222222222222",
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+
+    const res = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/checkout")
+      .send({
+        agentId: "22222222-2222-4222-8222-222222222222",
+        expectedStatuses: ["todo", "in_progress"],
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("skips duplicate release side effects when issue is already released", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      ...makeIssue("todo"),
+      status: "todo",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    mockIssueService.release.mockResolvedValue({
+      ...makeIssue("todo"),
+      status: "todo",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+
+    const res = await request(createApp())
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/release")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 });

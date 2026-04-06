@@ -1395,6 +1395,25 @@ export function issueService(db: Db) {
       };
     },
 
+    getByOrigin: async (companyId: string, originKind: string, originId: string) => {
+      const row = await db
+        .select()
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, companyId),
+            eq(issues.originKind, originKind),
+            eq(issues.originId, originId),
+          ),
+        )
+        .orderBy(desc(issues.createdAt), desc(issues.id))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!row) return null;
+      const [enriched] = await withIssueLabels(db, [row]);
+      return enriched;
+    },
+
     create: async (
       companyId: string,
       data: IssueCreateInput,
@@ -1977,12 +1996,26 @@ export function issueService(db: Db) {
         });
       }
 
+      if (
+        existing.status === "todo" &&
+        existing.assigneeAgentId == null &&
+        existing.assigneeUserId == null &&
+        existing.checkoutRunId == null &&
+        existing.executionRunId == null
+      ) {
+        const [enrichedExisting] = await withIssueLabels(db, [existing]);
+        return enrichedExisting;
+      }
+
       const updated = await db
         .update(issues)
         .set({
           status: "todo",
           assigneeAgentId: null,
+          assigneeUserId: null,
           checkoutRunId: null,
+          executionRunId: null,
+          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))
@@ -2132,6 +2165,32 @@ export function issueService(db: Db) {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
+      const normalizedRunId = actor.runId && isUuidLike(actor.runId) ? actor.runId : null;
+
+      if (normalizedRunId) {
+        const replayed = await db
+          .select()
+          .from(issueComments)
+          .where(
+            and(
+              eq(issueComments.issueId, issueId),
+              eq(issueComments.createdByRunId, normalizedRunId),
+              actor.agentId ? eq(issueComments.authorAgentId, actor.agentId) : isNull(issueComments.authorAgentId),
+              actor.userId ? eq(issueComments.authorUserId, actor.userId) : isNull(issueComments.authorUserId),
+              eq(issueComments.body, redactedBody),
+            ),
+          )
+          .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (replayed) {
+          return {
+            ...redactIssueComment(replayed, currentUserRedactionOptions.enabled),
+            replayed: true as const,
+          };
+        }
+      }
+
       const [comment] = await db
         .insert(issueComments)
         .values({
@@ -2139,7 +2198,7 @@ export function issueService(db: Db) {
           issueId,
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: normalizedRunId,
           body: redactedBody,
         })
         .returning();
@@ -2150,7 +2209,10 @@ export function issueService(db: Db) {
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
 
-      return redactIssueComment(comment, currentUserRedactionOptions.enabled);
+      return {
+        ...redactIssueComment(comment, currentUserRedactionOptions.enabled),
+        replayed: false as const,
+      };
     },
 
     createAttachment: async (input: {

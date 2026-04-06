@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { createHash } from "node:crypto";
 import multer from "multer";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
@@ -107,6 +108,24 @@ export function issueRoutes(
       throw new HttpError(400, `Invalid ${field} query value`);
     }
     return parsed;
+  }
+
+  function stableStringify(value: unknown): string {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  }
+
+  function sha256(value: unknown) {
+    return createHash("sha256").update(stableStringify(value)).digest("hex");
+  }
+
+  function normalizeIdempotencyKey(raw: unknown) {
+    if (typeof raw !== "string") return null;
+    const key = raw.trim();
+    return key.length > 0 ? key : null;
   }
 
   async function runSingleFileUpload(req: Request, res: Response) {
@@ -1050,10 +1069,36 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    const explicitIdempotencyKey = normalizeIdempotencyKey(req.header("idempotency-key"));
+    const autoSubtaskRetryKey =
+      !explicitIdempotencyKey && actor.runId && req.body.parentId
+        ? `run:${actor.runId}:${sha256(req.body)}`
+        : null;
+    const idempotencyKey = explicitIdempotencyKey ?? autoSubtaskRetryKey;
+    const createOriginKind = idempotencyKey ? "api_retry_key" : null;
+    const createOriginId = idempotencyKey
+      ? `create:${actor.actorType}:${actor.actorId}:${idempotencyKey}`
+      : null;
+
+    if (createOriginKind && createOriginId && typeof svc.getByOrigin === "function") {
+      const replayed = await svc.getByOrigin(companyId, createOriginKind, createOriginId);
+      if (replayed) {
+        res.status(200).json(replayed);
+        return;
+      }
+    }
+
     const issue = await svc.create(companyId, {
       ...req.body,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      originRunId: actor.runId ?? null,
+      ...(createOriginKind && createOriginId
+        ? {
+          originKind: createOriginKind,
+          originId: createOriginId,
+        }
+        : {}),
     });
 
     await logActivity(db, {
@@ -1241,24 +1286,27 @@ export function issueRoutes(
       previous.status !== undefined &&
       issue.status === "todo";
     const reopenFromStatus = reopened ? existing.status : null;
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.updated",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        ...updateFields,
-        identifier: issue.identifier,
-        ...(commentBody ? { source: "comment" } : {}),
-        ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus } : {}),
-        ...(interruptedRunId ? { interruptedRunId } : {}),
-        _previous: hasFieldChanges ? previous : undefined,
-      },
-    });
+    const shouldLogIssueUpdate = hasFieldChanges || reopened || Boolean(interruptedRunId);
+    if (shouldLogIssueUpdate) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          ...updateFields,
+          identifier: issue.identifier,
+          ...(commentBody ? { source: "comment" } : {}),
+          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus } : {}),
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+          _previous: hasFieldChanges ? previous : undefined,
+        },
+      });
+    }
 
     if (Array.isArray(req.body.blockedByIssueIds)) {
       const previousBlockedByIds = new Set((existingRelations?.blockedBy ?? []).map((relation) => relation.id));
@@ -1295,33 +1343,40 @@ export function issueRoutes(
       }
     }
 
-    let comment = null;
+    let comment: ({ id: string; body: string } & Record<string, unknown>) | null = null;
+    let commentReplayed = false;
     if (commentBody) {
-      comment = await svc.addComment(id, commentBody, {
+      const commentResult = await svc.addComment(id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
       });
+      commentReplayed = (commentResult as { replayed?: boolean }).replayed === true;
+      const { replayed: _replayed, ...commentPayload } = commentResult as
+        { id: string; body: string } & Record<string, unknown> & { replayed?: boolean };
+      comment = commentPayload;
 
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        action: "issue.comment_added",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          commentId: comment.id,
-          bodySnippet: comment.body.slice(0, 120),
-          identifier: issue.identifier,
-          issueTitle: issue.title,
-          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
-          ...(interruptedRunId ? { interruptedRunId } : {}),
-          ...(hasFieldChanges ? { updated: true } : {}),
-        },
-      });
+      if (!commentReplayed) {
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.comment_added",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            commentId: comment.id,
+            bodySnippet: String(comment.body ?? "").slice(0, 120),
+            identifier: issue.identifier,
+            issueTitle: issue.title,
+            ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
+            ...(interruptedRunId ? { interruptedRunId } : {}),
+            ...(hasFieldChanges ? { updated: true } : {}),
+          },
+        });
+      }
 
     }
 
@@ -1383,7 +1438,7 @@ export function issueRoutes(
         });
       }
 
-      if (commentBody && comment) {
+      if (commentBody && comment && !commentReplayed) {
         let mentionedIds: string[] = [];
         try {
           mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
@@ -1553,20 +1608,29 @@ export function issueRoutes(
     if (req.actor.type === "agent" && !checkoutRunId) return;
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
+    const checkoutChanged =
+      issue.status !== updated.status ||
+      issue.assigneeAgentId !== updated.assigneeAgentId ||
+      issue.assigneeUserId !== updated.assigneeUserId ||
+      issue.checkoutRunId !== updated.checkoutRunId ||
+      issue.executionRunId !== updated.executionRunId;
 
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.checked_out",
-      entityType: "issue",
-      entityId: issue.id,
-      details: { agentId: req.body.agentId },
-    });
+    if (checkoutChanged) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.checked_out",
+        entityType: "issue",
+        entityId: issue.id,
+        details: { agentId: req.body.agentId },
+      });
+    }
 
     if (
+      checkoutChanged &&
       shouldWakeAssigneeOnCheckout({
         actorType: req.actor.type,
         actorAgentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
@@ -1613,16 +1677,24 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: released.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.released",
-      entityType: "issue",
-      entityId: released.id,
-    });
+    const releaseChanged =
+      existing.status !== released.status ||
+      existing.assigneeAgentId !== released.assigneeAgentId ||
+      existing.assigneeUserId !== released.assigneeUserId ||
+      existing.checkoutRunId !== released.checkoutRunId ||
+      existing.executionRunId !== released.executionRunId;
+    if (releaseChanged) {
+      await logActivity(db, {
+        companyId: released.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.released",
+        entityType: "issue",
+        entityId: released.id,
+      });
+    }
 
     res.json(released);
   });
@@ -1837,35 +1909,40 @@ export function issueRoutes(
       }
     }
 
-    const comment = await svc.addComment(id, req.body.body, {
+    const commentResult = await svc.addComment(id, req.body.body, {
       agentId: actor.agentId ?? undefined,
       userId: actor.actorType === "user" ? actor.actorId : undefined,
       runId: actor.runId,
     });
+    const commentReplayed = (commentResult as { replayed?: boolean }).replayed === true;
+    const { replayed: _commentReplayed, ...comment } = commentResult as
+      { id: string; body: string } & Record<string, unknown> & { replayed?: boolean };
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
         logger.warn({ err, runId: actor.runId }, "failed to clear detached run warning after issue comment"));
     }
 
-    await logActivity(db, {
-      companyId: currentIssue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.comment_added",
-      entityType: "issue",
-      entityId: currentIssue.id,
-      details: {
-        commentId: comment.id,
-        bodySnippet: comment.body.slice(0, 120),
-        identifier: currentIssue.identifier,
-        issueTitle: currentIssue.title,
-        ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
-        ...(interruptedRunId ? { interruptedRunId } : {}),
-      },
-    });
+    if (!commentReplayed) {
+      await logActivity(db, {
+        companyId: currentIssue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: currentIssue.id,
+        details: {
+          commentId: comment.id,
+          bodySnippet: String(comment.body ?? "").slice(0, 120),
+          identifier: currentIssue.identifier,
+          issueTitle: currentIssue.title,
+          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+      });
+    }
 
     // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
     void (async () => {
@@ -1874,7 +1951,7 @@ export function issueRoutes(
       const actorIsAgent = actor.actorType === "agent";
       const selfComment = actorIsAgent && actor.actorId === assigneeId;
       const skipWake = selfComment || isClosed;
-      if (assigneeId && (reopened || !skipWake)) {
+      if (!commentReplayed && assigneeId && (reopened || !skipWake)) {
         if (reopened) {
           wakeups.set(assigneeId, {
             source: "automation",
@@ -1926,32 +2003,34 @@ export function issueRoutes(
         }
       }
 
-      let mentionedIds: string[] = [];
-      try {
-        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
-      } catch (err) {
-        logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
-      }
+      if (!commentReplayed) {
+        let mentionedIds: string[] = [];
+        try {
+          mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
+        } catch (err) {
+          logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
+        }
 
-      for (const mentionedId of mentionedIds) {
-        if (wakeups.has(mentionedId)) continue;
-        if (actorIsAgent && actor.actorId === mentionedId) continue;
-        wakeups.set(mentionedId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_comment_mentioned",
-          payload: { issueId: id, commentId: comment.id },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: id,
-            taskId: id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            wakeReason: "issue_comment_mentioned",
-            source: "comment.mention",
-          },
-        });
+        for (const mentionedId of mentionedIds) {
+          if (wakeups.has(mentionedId)) continue;
+          if (actorIsAgent && actor.actorId === mentionedId) continue;
+          wakeups.set(mentionedId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_comment_mentioned",
+            payload: { issueId: id, commentId: comment.id },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: id,
+              taskId: id,
+              commentId: comment.id,
+              wakeCommentId: comment.id,
+              wakeReason: "issue_comment_mentioned",
+              source: "comment.mention",
+            },
+          });
+        }
       }
 
       for (const [agentId, wakeup] of wakeups.entries()) {
@@ -1961,7 +2040,7 @@ export function issueRoutes(
       }
     })();
 
-    res.status(201).json(comment);
+    res.status(commentReplayed ? 200 : 201).json(comment);
   });
 
   router.post("/issues/:id/feedback-votes", validate(upsertIssueFeedbackVoteSchema), async (req, res) => {

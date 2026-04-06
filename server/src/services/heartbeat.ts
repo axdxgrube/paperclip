@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
@@ -85,6 +86,38 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
+let didLogGeneratedLocalAgentJwtSecret = false;
+
+export function ensureHeartbeatLocalAgentJwtSecret(): string {
+  const existing = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+  if (existing) return existing;
+
+  const generated = randomBytes(32).toString("hex");
+  process.env.PAPERCLIP_AGENT_JWT_SECRET = generated;
+  if (!didLogGeneratedLocalAgentJwtSecret) {
+    didLogGeneratedLocalAgentJwtSecret = true;
+    logger.warn(
+      "PAPERCLIP_AGENT_JWT_SECRET was missing; generated an in-memory secret so local adapter heartbeats can inject PAPERCLIP_API_KEY",
+    );
+  }
+  return generated;
+}
+
+export function createHeartbeatLocalAgentAuthToken(input: {
+  supportsLocalAgentJwt: boolean;
+  agentId: string;
+  companyId: string;
+  adapterType: string;
+  runId: string;
+}): string | null {
+  if (!input.supportsLocalAgentJwt) return null;
+
+  const direct = createLocalAgentJwt(input.agentId, input.companyId, input.adapterType, input.runId);
+  if (direct) return direct;
+
+  ensureHeartbeatLocalAgentJwtSecret();
+  return createLocalAgentJwt(input.agentId, input.companyId, input.adapterType, input.runId);
+}
 
 export function applyPersistedExecutionWorkspaceConfig(input: {
   config: Record<string, unknown>;
@@ -302,6 +335,12 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+}
+
+function normalizeWakeupIdempotencyKey(value: string | null | undefined) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 type UsageTotals = {
@@ -1708,6 +1747,54 @@ export function heartbeatService(db: Db) {
       .where(eq(agentWakeupRequests.id, wakeupRequestId));
   }
 
+  async function findReplayableWakeup(input: {
+    companyId: string;
+    agentId: string;
+    idempotencyKey: string;
+  }) {
+    const existing = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, input.companyId),
+          eq(agentWakeupRequests.agentId, input.agentId),
+          eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
+        ),
+      )
+      .orderBy(desc(agentWakeupRequests.requestedAt), desc(agentWakeupRequests.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    if (!existing) return null;
+
+    let existingRun = existing.runId ? await getRun(existing.runId) : null;
+    if (!existingRun) {
+      existingRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.wakeupRequestId, existing.id))
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+    }
+
+    if (existingRun && existing.runId !== existingRun.id) {
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          runId: existingRun.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(agentWakeupRequests.id, existing.id));
+    }
+
+    return {
+      request: existing,
+      run: existingRun,
+    };
+  }
+
   async function appendRunEvent(
     run: typeof heartbeatRuns.$inferSelect,
     seq: number,
@@ -2857,9 +2944,13 @@ export function heartbeatService(db: Db) {
       };
 
       const adapter = getServerAdapter(agent.adapterType);
-      const authToken = adapter.supportsLocalAgentJwt
-        ? createLocalAgentJwt(agent.id, agent.companyId, agent.adapterType, run.id)
-        : null;
+      const authToken = createHeartbeatLocalAgentAuthToken({
+        supportsLocalAgentJwt: adapter.supportsLocalAgentJwt === true,
+        agentId: agent.id,
+        companyId: agent.companyId,
+        adapterType: agent.adapterType,
+        runId: run.id,
+      });
       if (adapter.supportsLocalAgentJwt && !authToken) {
         logger.warn(
           {
@@ -3348,6 +3439,7 @@ export function heartbeatService(db: Db) {
     const contextSnapshot: Record<string, unknown> = { ...(opts.contextSnapshot ?? {}) };
     const reason = opts.reason ?? null;
     const payload = opts.payload ?? null;
+    const idempotencyKey = normalizeWakeupIdempotencyKey(opts.idempotencyKey);
     const {
       contextSnapshot: enrichedContextSnapshot,
       issueIdFromPayload,
@@ -3364,6 +3456,18 @@ export function heartbeatService(db: Db) {
 
     const agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+
+    if (idempotencyKey) {
+      const replay = await findReplayableWakeup({
+        companyId: agent.companyId,
+        agentId,
+        idempotencyKey,
+      });
+      if (replay) {
+        return replay.run;
+      }
+    }
+
     const explicitResumeSession = await resolveExplicitResumeSessionOverride(agent, payload, taskKey);
     if (explicitResumeSession) {
       enrichedContextSnapshot.resumeFromRunId = explicitResumeSession.resumeFromRunId;
@@ -3396,7 +3500,7 @@ export function heartbeatService(db: Db) {
         status: "skipped",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey,
         finishedAt: new Date(),
       });
     };
@@ -3475,7 +3579,7 @@ export function heartbeatService(db: Db) {
             status: "skipped",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
@@ -3584,7 +3688,7 @@ export function heartbeatService(db: Db) {
               coalescedCount: 1,
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
+              idempotencyKey,
               runId: mergedRun.id,
               finishedAt: new Date(),
             });
@@ -3649,7 +3753,7 @@ export function heartbeatService(db: Db) {
             status: "deferred_issue_execution",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey,
           });
 
           return { kind: "deferred" as const };
@@ -3667,7 +3771,7 @@ export function heartbeatService(db: Db) {
             status: "queued",
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            idempotencyKey,
           })
           .returning()
           .then((rows) => rows[0]);
@@ -3773,7 +3877,7 @@ export function heartbeatService(db: Db) {
         coalescedCount: 1,
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey,
         runId: mergedRun.id,
         finishedAt: new Date(),
       });
@@ -3792,7 +3896,7 @@ export function heartbeatService(db: Db) {
         status: "queued",
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
+        idempotencyKey,
       })
       .returning()
       .then((rows) => rows[0]);
