@@ -12,6 +12,12 @@ describe("routine variable helpers", () => {
     ).toEqual(["repo", "priority"]);
   });
 
+  it("extracts placeholder names when underscores are markdown-escaped", () => {
+    expect(
+      extractRoutineVariableNames("Evaluate {{idea\\_title}} for {{target\\_user}}"),
+    ).toEqual(["idea_title", "target_user"]);
+  });
+
   it("preserves existing metadata when syncing variables from a template", () => {
     expect(
       syncRoutineVariablesWithTemplate("Review {{repo}} and {{priority}}", [
@@ -30,5 +36,14 @@ describe("routine variable helpers", () => {
         priority: "high",
       }),
     ).toBe("Review paperclip for high");
+  });
+
+  it("interpolates escaped-underscore placeholders into the routine template", () => {
+    expect(
+      interpolateRoutineTemplate("Review {{idea\\_title}} for {{target\\_user}}", {
+        idea_title: "AI Meeting Debrief",
+        target_user: "founders",
+      }),
+    ).toBe("Review AI Meeting Debrief for founders");
   });
 });

@@ -22,7 +22,7 @@ export const routines = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
     goalId: uuid("goal_id").references(() => goals.id, { onDelete: "set null" }),
     parentIssueId: uuid("parent_issue_id").references(() => issues.id, { onDelete: "set null" }),
     title: text("title").notNull(),

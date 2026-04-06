@@ -359,6 +359,7 @@ export function Routines() {
     mutationFn: () =>
       routinesApi.create(selectedCompanyId!, {
         ...draft,
+        projectId: draft.projectId || null,
         description: draft.description.trim() || null,
       }),
     onSuccess: async (routine) => {
@@ -685,11 +686,7 @@ export function Routines() {
                   if (event.key === "Tab" && !event.shiftKey) {
                     event.preventDefault();
                     if (draft.assigneeAgentId) {
-                      if (draft.projectId) {
-                        descriptionEditorRef.current?.focus();
-                      } else {
-                        projectSelectorRef.current?.focus();
-                      }
+                      descriptionEditorRef.current?.focus();
                     } else {
                       assigneeSelectorRef.current?.focus();
                     }
@@ -715,13 +712,7 @@ export function Routines() {
                       if (assigneeAgentId) trackRecentAssignee(assigneeAgentId);
                       setDraft((current) => ({ ...current, assigneeAgentId }));
                     }}
-                    onConfirm={() => {
-                      if (draft.projectId) {
-                        descriptionEditorRef.current?.focus();
-                      } else {
-                        projectSelectorRef.current?.focus();
-                      }
-                    }}
+                    onConfirm={() => descriptionEditorRef.current?.focus()}
                     renderTriggerValue={(option) =>
                       option ? (
                         currentAssignee ? (
@@ -798,7 +789,7 @@ export function Routines() {
                 bordered={false}
                 contentClassName="min-h-[160px] text-sm text-muted-foreground"
                 onSubmit={() => {
-                  if (!createRoutine.isPending && draft.title.trim() && draft.projectId && draft.assigneeAgentId) {
+                  if (!createRoutine.isPending && draft.title.trim() && draft.assigneeAgentId) {
                     createRoutine.mutate();
                   }
                 }}
@@ -874,7 +865,6 @@ export function Routines() {
                 disabled={
                   createRoutine.isPending ||
                   !draft.title.trim() ||
-                  !draft.projectId ||
                   !draft.assigneeAgentId
                 }
               >

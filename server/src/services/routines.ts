@@ -905,7 +905,9 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
       const row = await getRoutineById(id);
       if (!row) return null;
       const [project, assignee, parentIssue, triggers, recentRuns, activeIssue] = await Promise.all([
-        db.select().from(projects).where(eq(projects.id, row.projectId)).then((rows) => rows[0] ?? null),
+        row.projectId
+          ? db.select().from(projects).where(eq(projects.id, row.projectId)).then((rows) => rows[0] ?? null)
+          : Promise.resolve(null),
         db.select().from(agents).where(eq(agents.id, row.assigneeAgentId)).then((rows) => rows[0] ?? null),
         row.parentIssueId ? issueSvc.getById(row.parentIssueId) : null,
         db.select().from(routineTriggers).where(eq(routineTriggers.routineId, row.id)).orderBy(asc(routineTriggers.createdAt)),
@@ -991,7 +993,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     },
 
     create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
-      await assertProject(companyId, input.projectId);
+      if (input.projectId) await assertProject(companyId, input.projectId);
       await assertAssignableAgent(companyId, input.assigneeAgentId);
       if (input.goalId) await assertGoal(companyId, input.goalId);
       if (input.parentIssueId) await assertParentIssue(companyId, input.parentIssueId);
@@ -1004,7 +1006,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         .insert(routines)
         .values({
           companyId,
-          projectId: input.projectId,
+          projectId: input.projectId ?? null,
           goalId: input.goalId ?? null,
           parentIssueId: input.parentIssueId ?? null,
           title: input.title,
@@ -1027,14 +1029,14 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     update: async (id: string, patch: UpdateRoutine, actor: Actor): Promise<Routine | null> => {
       const existing = await getRoutineById(id);
       if (!existing) return null;
-      const nextProjectId = patch.projectId ?? existing.projectId;
+      const nextProjectId = patch.projectId === undefined ? existing.projectId : patch.projectId;
       const nextAssigneeAgentId = patch.assigneeAgentId ?? existing.assigneeAgentId;
       const nextDescription = patch.description === undefined ? existing.description : patch.description;
       const nextVariables = syncRoutineVariablesWithTemplate(
         nextDescription,
         patch.variables === undefined ? existing.variables : sanitizeRoutineVariableInputs(patch.variables),
       );
-      if (patch.projectId) await assertProject(existing.companyId, nextProjectId);
+      if (nextProjectId) await assertProject(existing.companyId, nextProjectId);
       if (patch.assigneeAgentId) await assertAssignableAgent(existing.companyId, nextAssigneeAgentId);
       if (patch.goalId) await assertGoal(existing.companyId, patch.goalId);
       if (patch.parentIssueId) await assertParentIssue(existing.companyId, patch.parentIssueId);

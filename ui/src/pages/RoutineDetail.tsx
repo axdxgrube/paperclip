@@ -340,7 +340,7 @@ export function RoutineDetail() {
         ? {
             title: routine.title,
             description: routine.description ?? "",
-            projectId: routine.projectId,
+            projectId: routine.projectId ?? "",
             assigneeAgentId: routine.assigneeAgentId,
             priority: routine.priority,
             concurrencyPolicy: routine.concurrencyPolicy,
@@ -415,6 +415,7 @@ export function RoutineDetail() {
     mutationFn: () => {
       return routinesApi.update(routineId!, {
         ...editDraft,
+        projectId: editDraft.projectId || null,
         description: editDraft.description.trim() || null,
       });
     },
@@ -689,11 +690,7 @@ export function RoutineDetail() {
             if (event.key === "Tab" && !event.shiftKey) {
               event.preventDefault();
               if (editDraft.assigneeAgentId) {
-                if (editDraft.projectId) {
-                  descriptionEditorRef.current?.focus();
-                } else {
-                  projectSelectorRef.current?.focus();
-                }
+                descriptionEditorRef.current?.focus();
               } else {
                 assigneeSelectorRef.current?.focus();
               }
@@ -766,13 +763,7 @@ export function RoutineDetail() {
               if (assigneeAgentId) trackRecentAssignee(assigneeAgentId);
               setEditDraft((current) => ({ ...current, assigneeAgentId }));
             }}
-            onConfirm={() => {
-              if (editDraft.projectId) {
-                descriptionEditorRef.current?.focus();
-              } else {
-                projectSelectorRef.current?.focus();
-              }
-            }}
+            onConfirm={() => descriptionEditorRef.current?.focus()}
             renderTriggerValue={(option) =>
               option ? (
                 currentAssignee ? (
@@ -915,7 +906,7 @@ export function RoutineDetail() {
         )}
         <Button
           onClick={() => saveRoutine.mutate()}
-          disabled={saveRoutine.isPending || !editDraft.title.trim() || !editDraft.projectId || !editDraft.assigneeAgentId}
+          disabled={saveRoutine.isPending || !editDraft.title.trim() || !editDraft.assigneeAgentId}
         >
           <Save className="mr-2 h-4 w-4" />
           Save routine

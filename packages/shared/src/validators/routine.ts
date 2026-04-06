@@ -48,7 +48,7 @@ export const routineVariableSchema = z.object({
 });
 
 export const createRoutineSchema = z.object({
-  projectId: z.string().uuid(),
+  projectId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
   parentIssueId: z.string().uuid().optional().nullable(),
   title: z.string().trim().min(1).max(200),
