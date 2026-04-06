@@ -133,6 +133,35 @@ async function flush() {
   });
 }
 
+function installLocalStorageMock() {
+  const storage = new Map<string, string>();
+  const mockLocalStorage = {
+    get length() {
+      return storage.size;
+    },
+    key(index: number) {
+      return Array.from(storage.keys())[index] ?? null;
+    },
+    getItem(key: string) {
+      return storage.has(key) ? storage.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      storage.set(key, String(value));
+    },
+    removeItem(key: string) {
+      storage.delete(key);
+    },
+    clear() {
+      storage.clear();
+    },
+  };
+
+  Object.defineProperty(window, "localStorage", {
+    value: mockLocalStorage,
+    configurable: true,
+  });
+}
+
 function createIssueDocument(overrides: Partial<IssueDocument> = {}): IssueDocument {
   return {
     id: "document-1",
@@ -221,6 +250,7 @@ describe("IssueDocumentsSection", () => {
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
+    installLocalStorageMock();
     window.localStorage.clear();
     vi.clearAllMocks();
     markdownEditorMockState.emitMountEmptyChange = false;

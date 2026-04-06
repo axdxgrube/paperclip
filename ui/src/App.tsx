@@ -1,54 +1,78 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { type ComponentType, Suspense, lazy } from "react";
 import { Layout } from "./components/Layout";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { authApi } from "./api/auth";
 import { healthApi } from "./api/health";
-import { Dashboard } from "./pages/Dashboard";
-import { Companies } from "./pages/Companies";
-import { Agents } from "./pages/Agents";
-import { AgentDetail } from "./pages/AgentDetail";
-import { Projects } from "./pages/Projects";
-import { ProjectDetail } from "./pages/ProjectDetail";
-import { ProjectWorkspaceDetail } from "./pages/ProjectWorkspaceDetail";
-import { Issues } from "./pages/Issues";
-import { IssueDetail } from "./pages/IssueDetail";
-import { Routines } from "./pages/Routines";
-import { RoutineDetail } from "./pages/RoutineDetail";
-import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
-import { Goals } from "./pages/Goals";
-import { GoalDetail } from "./pages/GoalDetail";
-import { Approvals } from "./pages/Approvals";
-import { ApprovalDetail } from "./pages/ApprovalDetail";
-import { Costs } from "./pages/Costs";
-import { Activity } from "./pages/Activity";
-import { Inbox } from "./pages/Inbox";
-import { CompanySettings } from "./pages/CompanySettings";
-import { CompanySkills } from "./pages/CompanySkills";
-import { CompanyExport } from "./pages/CompanyExport";
-import { CompanyImport } from "./pages/CompanyImport";
-import { DesignGuide } from "./pages/DesignGuide";
-import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
-import { InstanceSettings } from "./pages/InstanceSettings";
-import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
-import { PluginManager } from "./pages/PluginManager";
-import { PluginSettings } from "./pages/PluginSettings";
-import { AdapterManager } from "./pages/AdapterManager";
-import { PluginPage } from "./pages/PluginPage";
-import { RunTranscriptUxLab } from "./pages/RunTranscriptUxLab";
-import { OrgChart } from "./pages/OrgChart";
-import { NewAgent } from "./pages/NewAgent";
-import { AuthPage } from "./pages/Auth";
-import { BoardClaimPage } from "./pages/BoardClaim";
-import { CliAuthPage } from "./pages/CliAuth";
-import { InviteLandingPage } from "./pages/InviteLanding";
 import { NotFoundPage } from "./pages/NotFound";
 import { queryKeys } from "./lib/queryKeys";
 import { useCompany } from "./context/CompanyContext";
 import { useDialog } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
 import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-route";
+
+function lazyPage<TModule, TComponent extends ComponentType<any>>(
+  load: () => Promise<TModule>,
+  pick: (module: TModule) => TComponent,
+) {
+  return lazy(async () => {
+    const module = await load();
+    return { default: pick(module) };
+  });
+}
+
+const Dashboard = lazyPage(() => import("./pages/Dashboard"), (module) => module.Dashboard);
+const Companies = lazyPage(() => import("./pages/Companies"), (module) => module.Companies);
+const Agents = lazyPage(() => import("./pages/Agents"), (module) => module.Agents);
+const AgentDetail = lazyPage(() => import("./pages/AgentDetail"), (module) => module.AgentDetail);
+const Projects = lazyPage(() => import("./pages/Projects"), (module) => module.Projects);
+const ProjectDetail = lazyPage(() => import("./pages/ProjectDetail"), (module) => module.ProjectDetail);
+const ProjectWorkspaceDetail = lazyPage(
+  () => import("./pages/ProjectWorkspaceDetail"),
+  (module) => module.ProjectWorkspaceDetail,
+);
+const Issues = lazyPage(() => import("./pages/Issues"), (module) => module.Issues);
+const IssueDetail = lazyPage(() => import("./pages/IssueDetail"), (module) => module.IssueDetail);
+const Routines = lazyPage(() => import("./pages/Routines"), (module) => module.Routines);
+const RoutineDetail = lazyPage(() => import("./pages/RoutineDetail"), (module) => module.RoutineDetail);
+const ExecutionWorkspaceDetail = lazyPage(
+  () => import("./pages/ExecutionWorkspaceDetail"),
+  (module) => module.ExecutionWorkspaceDetail,
+);
+const Goals = lazyPage(() => import("./pages/Goals"), (module) => module.Goals);
+const GoalDetail = lazyPage(() => import("./pages/GoalDetail"), (module) => module.GoalDetail);
+const Approvals = lazyPage(() => import("./pages/Approvals"), (module) => module.Approvals);
+const ApprovalDetail = lazyPage(() => import("./pages/ApprovalDetail"), (module) => module.ApprovalDetail);
+const Costs = lazyPage(() => import("./pages/Costs"), (module) => module.Costs);
+const Activity = lazyPage(() => import("./pages/Activity"), (module) => module.Activity);
+const Inbox = lazyPage(() => import("./pages/Inbox"), (module) => module.Inbox);
+const CompanySettings = lazyPage(() => import("./pages/CompanySettings"), (module) => module.CompanySettings);
+const CompanySkills = lazyPage(() => import("./pages/CompanySkills"), (module) => module.CompanySkills);
+const CompanyExport = lazyPage(() => import("./pages/CompanyExport"), (module) => module.CompanyExport);
+const CompanyImport = lazyPage(() => import("./pages/CompanyImport"), (module) => module.CompanyImport);
+const DesignGuide = lazyPage(() => import("./pages/DesignGuide"), (module) => module.DesignGuide);
+const InstanceGeneralSettings = lazyPage(
+  () => import("./pages/InstanceGeneralSettings"),
+  (module) => module.InstanceGeneralSettings,
+);
+const InstanceSettings = lazyPage(() => import("./pages/InstanceSettings"), (module) => module.InstanceSettings);
+const InstanceExperimentalSettings = lazyPage(
+  () => import("./pages/InstanceExperimentalSettings"),
+  (module) => module.InstanceExperimentalSettings,
+);
+const PluginManager = lazyPage(() => import("./pages/PluginManager"), (module) => module.PluginManager);
+const PluginSettings = lazyPage(() => import("./pages/PluginSettings"), (module) => module.PluginSettings);
+const AdapterManager = lazyPage(() => import("./pages/AdapterManager"), (module) => module.AdapterManager);
+const PluginPage = lazyPage(() => import("./pages/PluginPage"), (module) => module.PluginPage);
+const RunTranscriptUxLab = lazyPage(() => import("./pages/RunTranscriptUxLab"), (module) => module.RunTranscriptUxLab);
+const OrgChart = lazyPage(() => import("./pages/OrgChart"), (module) => module.OrgChart);
+const NewAgent = lazyPage(() => import("./pages/NewAgent"), (module) => module.NewAgent);
+const AuthPage = lazyPage(() => import("./pages/Auth"), (module) => module.AuthPage);
+const BoardClaimPage = lazyPage(() => import("./pages/BoardClaim"), (module) => module.BoardClaimPage);
+const CliAuthPage = lazyPage(() => import("./pages/CliAuth"), (module) => module.CliAuthPage);
+const InviteLandingPage = lazyPage(() => import("./pages/InviteLanding"), (module) => module.InviteLandingPage);
 
 function BootstrapPendingPage({ hasActiveInvite = false }: { hasActiveInvite?: boolean }) {
   return (
@@ -306,11 +330,12 @@ function NoCompaniesStartPage() {
 export function App() {
   return (
     <>
-      <Routes>
-        <Route path="auth" element={<AuthPage />} />
-        <Route path="board-claim/:token" element={<BoardClaimPage />} />
-        <Route path="cli-auth/:id" element={<CliAuthPage />} />
-        <Route path="invite/:token" element={<InviteLandingPage />} />
+      <Suspense fallback={<div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>}>
+        <Routes>
+          <Route path="auth" element={<AuthPage />} />
+          <Route path="board-claim/:token" element={<BoardClaimPage />} />
+          <Route path="cli-auth/:id" element={<CliAuthPage />} />
+          <Route path="invite/:token" element={<InviteLandingPage />} />
 
         <Route element={<CloudAccessGate />}>
           <Route index element={<CompanyRootRedirect />} />
@@ -354,6 +379,7 @@ export function App() {
           <Route path="*" element={<NotFoundPage scope="global" />} />
         </Route>
       </Routes>
+      </Suspense>
       <OnboardingWizard />
     </>
   );

@@ -1011,6 +1011,22 @@ export function CompanySkills() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 text-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setEmptySourceHelpOpen(false);
+                setCreateOpen(true);
+              }}
+              className="flex w-full items-start justify-between rounded-md border border-border px-3 py-3 text-left text-foreground transition-colors hover:bg-accent/40"
+            >
+              <span>
+                <span className="block font-medium">Create local skill manually</span>
+                <span className="mt-1 block text-muted-foreground">
+                  Add a Paperclip-managed skill you can edit directly in this company.
+                </span>
+              </span>
+              <Plus className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
             <a
               href="https://skills.sh"
               target="_blank"
@@ -1055,6 +1071,10 @@ export function CompanySkills() {
                 </p>
               </div>
               <div className="flex items-center gap-1">
+                <Button variant="outline" size="sm" onClick={() => setCreateOpen((value) => !value)}>
+                  <Plus className="mr-1.5 h-4 w-4" />
+                  {createOpen ? "Close" : "New skill"}
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -1063,9 +1083,6 @@ export function CompanySkills() {
                   title="Scan project workspaces for skills"
                 >
                   <RefreshCw className={cn("h-4 w-4", scanProjects.isPending && "animate-spin")} />
-                </Button>
-                <Button variant="ghost" size="icon-sm" onClick={() => setCreateOpen((value) => !value)}>
-                  <Plus className="h-4 w-4" />
                 </Button>
               </div>
             </div>
@@ -1096,6 +1113,9 @@ export function CompanySkills() {
                 {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Add"}
               </Button>
             </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Use <span className="font-medium text-foreground">New skill</span> for company-local skills you want to author manually.
+            </p>
             {scanStatusMessage && (
               <p className="mt-3 text-xs text-muted-foreground">
                 {scanStatusMessage}
