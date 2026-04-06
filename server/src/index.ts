@@ -32,6 +32,7 @@ import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import {
   feedbackService,
   heartbeatService,
+  queueHealthWatchdogService,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
 } from "./services/index.js";
@@ -579,6 +580,7 @@ export async function startServer(): Promise<StartedServer> {
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
+    const queueHealthWatchdog = queueHealthWatchdogService(db as any);
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -609,6 +611,17 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "routine scheduler tick failed");
+        });
+
+      void queueHealthWatchdog
+        .tickIdleQueues(new Date())
+        .then((result) => {
+          if (result.seeded > 0) {
+            logger.info({ ...result }, "queue-health watchdog seeded CTO draft tasks");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "queue-health watchdog tick failed");
         });
   
       // Periodically reap orphaned runs (5-min staleness threshold) and make sure

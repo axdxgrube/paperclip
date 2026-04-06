@@ -3,12 +3,14 @@ import express from "express";
 import request from "supertest";
 import type { Db } from "@paperclipai/db";
 import { healthRoutes } from "../routes/health.js";
+import { recordApiLatencySample, resetApiLatencySamplesForTests } from "../services/api-latency.js";
 import * as devServerStatus from "../dev-server-status.js";
 import { serverVersion } from "../version.js";
 
 describe("GET /health", () => {
   beforeEach(() => {
     vi.spyOn(devServerStatus, "readPersistedDevServerStatus").mockReturnValue(undefined);
+    resetApiLatencySamplesForTests();
   });
 
   afterEach(() => {
@@ -52,5 +54,26 @@ describe("GET /health", () => {
       version: serverVersion,
       error: "database_unreachable",
     });
+  });
+
+  it("reports tracked latency summary at /health/latency", async () => {
+    recordApiLatencySample({
+      method: "GET",
+      path: "/api/health",
+      statusCode: 200,
+      durationMs: 42,
+    });
+
+    const app = express();
+    app.use("/api/health", healthRoutes());
+
+    const latencyRes = await request(app).get("/api/health/latency");
+    expect(latencyRes.status).toBe(200);
+    const healthRoute = latencyRes.body.routes.find((route: { key: string }) => route.key === "health");
+    expect(healthRoute).toBeTruthy();
+    expect(healthRoute.sampleCount).toBe(1);
+    expect(healthRoute.method).toBe("GET");
+    expect(healthRoute.pathTemplate).toBe("/api/health");
+    expect(healthRoute.latencyMs.p50).toBe(42);
   });
 });

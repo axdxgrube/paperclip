@@ -123,6 +123,15 @@ vi.mock("../services/index.js", () => ({
   routineService: vi.fn(() => ({
     tickScheduledTriggers: vi.fn(async () => ({ triggered: 0 })),
   })),
+  queueHealthWatchdogService: vi.fn(() => ({
+    tickIdleQueues: vi.fn(async () => ({
+      candidates: 0,
+      seeded: 0,
+      skippedNotIdle: 0,
+      skippedCooldown: 0,
+      inFlightSkipped: false,
+    })),
+  })),
 }));
 
 vi.mock("../storage/index.js", () => ({
