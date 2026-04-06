@@ -3220,7 +3220,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
     for (const routine of selectedRoutineRows) {
       const taskSlug = taskSlugByRoutineId.get(routine.id)!;
-      const projectSlug = projectSlugById.get(routine.projectId) ?? null;
+      const projectSlug = routine.projectId ? (projectSlugById.get(routine.projectId) ?? null) : null;
       const taskPath = `tasks/${taskSlug}/TASK.md`;
       const assigneeSlug = idToSlug.get(routine.assigneeAgentId) ?? null;
       files[taskPath] = buildMarkdown(

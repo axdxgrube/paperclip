@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -25,6 +25,7 @@ import {
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { routineService } from "../services/routines.ts";
+import { logger } from "../middleware/logger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -563,6 +564,10 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {
+    // Intentional warning path: routine dispatch logs when wakeup queueing fails.
+    // Keep this scoped/mocked so expected noise does not obscure real regressions in test output.
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+
     const { routine, svc } = await seedFixture({
       wakeup: async () => {
         throw new Error("queue unavailable");
@@ -581,6 +586,11 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .where(eq(issues.originId, routine.id));
 
     expect(routineIssues).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ issueId: expect.any(String), err: expect.any(Error) }),
+      "failed to wake assignee on issue assignment",
+    );
+    warnSpy.mockRestore();
   });
 
   it("accepts standard second-precision webhook timestamps for HMAC triggers", async () => {
