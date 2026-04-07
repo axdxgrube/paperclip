@@ -1,4 +1,5 @@
-import { index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { issues } from "./issues.js";
@@ -17,6 +18,7 @@ export const issueRelations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    typeCheck: check("issue_relations_type_check", sql`${table.type} IN ('blocks')`),
     companyIssueIdx: index("issue_relations_company_issue_idx").on(table.companyId, table.issueId),
     companyRelatedIssueIdx: index("issue_relations_company_related_issue_idx").on(table.companyId, table.relatedIssueId),
     companyTypeIdx: index("issue_relations_company_type_idx").on(table.companyId, table.type),

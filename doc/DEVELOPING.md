@@ -23,6 +23,74 @@ GitHub Actions owns `pnpm-lock.yaml`.
 - Pull request CI validates dependency resolution when manifests change.
 - Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
 
+## Pre-push Quality Baseline (matches CI)
+
+Before opening a PR (and before pushing follow-up commits), run:
+
+```sh
+pnpm -r typecheck
+pnpm test:run
+pnpm build
+pnpm check:ui-bundle-budget
+```
+
+`pnpm check:ui-bundle-budget` validates explicit frontend chunk thresholds from the latest optimized UI build (`ui/dist/assets`).
+
+For a single local command that reproduces the UI budget gate end-to-end:
+
+```sh
+pnpm check:ui-bundle-budget:local
+```
+
+## DB Migration Smoke Validation
+
+Before opening a PR that touches schema/runtime DB paths, run the migration smoke workflow locally:
+
+```sh
+pnpm smoke:db-migrations
+```
+
+This command enforces the full pre-PR migration sequence in a clean temporary Paperclip home:
+
+1. compile schema + run `pnpm db:generate` and verify it is a no-op (no migration files changed)
+2. apply migrations with `pnpm db:migrate`
+3. start the API and require a successful `GET /api/health` response
+
+If it fails, use the step name/log output to identify whether the breakage is in generation drift, migration apply, or post-migration startup.
+
+## Board-Critical E2E Smoke
+
+Run the board-critical smoke suite locally (company switch, assignment/delegation, status transition, activity visibility):
+
+```sh
+pnpm test:e2e:smoke
+```
+
+CI runs the same command with `PAPERCLIP_E2E_SKIP_LLM=true` and fails fast (`--max-failures=1`).
+
+## Issue Mutation Retry Semantics
+
+Issue mutation routes are retry-safe for transient network/time-out failures when the caller keeps request identity stable:
+
+- Agents should always send `X-Paperclip-Run-Id` on mutating issue requests.
+- Callers can send `Idempotency-Key` for explicit dedupe on create/comment/update/release/checkout retries.
+- Subtask creation (`POST /api/companies/:companyId/issues` with `parentId`) auto-derives a retry key from run id + payload when `Idempotency-Key` is omitted.
+
+Behavior on repeat delivery with same request identity:
+
+- `checkout` / `release` skip duplicate side effects (activity + wakeups) when state is already in the requested form.
+- `PATCH /issues/:id` is a no-op when the effective field set is unchanged.
+- `POST /issues/:id/comments` replays the existing run-scoped comment instead of writing duplicates.
+- Replayed comment requests return `200`; newly created comments return `201`.
+
+Triage flow for failures:
+
+1. Open the HTML report at `tests/e2e/playwright-report/` (or run `npx playwright show-report tests/e2e/playwright-report`).
+2. Inspect traces/screenshots in `tests/e2e/test-results/` for the failing step.
+3. Re-run only the affected spec while debugging (for example `pnpm test:e2e -- tests/e2e/board-critical-smoke.spec.ts`).
+
+These are the same required verification gates executed by GitHub Actions on pull requests and `master` pushes.
+
 ## Start Dev
 
 From repo root:
